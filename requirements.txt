@@ -1,0 +1,9 @@
+websockets
+aiohttp
+pandas
+numpy
+pyyaml
+python-dotenv
+pydantic
+pytest
+pytest-asyncio

@@ -9,24 +9,24 @@ logger = logging.getLogger(__name__)
 
 class TradingStrategy:
     """
-    Initial ETH/USDT trading strategy.
+    ETH/USDT trading strategy.
 
-    Uses:
+    Indicators:
+        - EMA 9
+        - EMA 21
+        - EMA 50
+        - RSI 14
+        - MACD
+        - ATR 14
+        - Volume Ratio
 
-        EMA 9
-        EMA 21
-        EMA 50
-        RSI 14
-        MACD
-        Volume
+    Signals:
+        - BUY
+        - SELL
+        - HOLD
 
-    Returns:
-
-        BUY
-        SELL
-        HOLD
-
-    This class DOES NOT execute trades.
+    This class ONLY generates trading signals.
+    It does not execute trades.
     """
 
     def __init__(
@@ -37,10 +37,30 @@ class TradingStrategy:
         self.minimum_candles = minimum_candles
         self.volume_threshold = volume_threshold
 
+    # ==================================================
+    # GENERATE SIGNAL
+    # ==================================================
+
     def generate_signal(
         self,
         candles: list[dict],
     ) -> dict:
+        """
+        Generate a BUY / SELL / HOLD signal.
+
+        Parameters:
+            candles:
+                List of OHLCV candle dictionaries.
+
+        Returns:
+            Dictionary containing:
+                action
+                price
+                confidence
+                score
+                reason
+                indicators
+        """
 
         if len(candles) < self.minimum_candles:
 
@@ -82,12 +102,22 @@ class TradingStrategy:
                 f"Strategy error: {exc}"
             )
 
+    # ==================================================
+    # EVALUATE INDICATORS
+    # ==================================================
+
     def _evaluate(
         self,
         row,
     ) -> dict:
+        """
+        Evaluate the latest indicator values
+        and generate a trading signal.
+        """
 
-        price = float(row["close"])
+        price = self._safe_float(
+            row["close"]
+        )
 
         ema_9 = row["ema_9"]
         ema_21 = row["ema_21"]
@@ -99,9 +129,14 @@ class TradingStrategy:
         macd_signal = row["macd_signal"]
         macd_histogram = row["macd_histogram"]
 
+        atr_14 = row["atr_14"]
+
         volume_ratio = row["volume_ratio"]
 
-        # Make sure indicators are ready.
+        # ----------------------------------------------
+        # CHECK INDICATORS
+        # ----------------------------------------------
+
         required = [
             ema_9,
             ema_21,
@@ -110,6 +145,7 @@ class TradingStrategy:
             macd,
             macd_signal,
             macd_histogram,
+            atr_14,
             volume_ratio,
         ]
 
@@ -123,7 +159,10 @@ class TradingStrategy:
                 price,
             )
 
-        # Convert to floats.
+        # ----------------------------------------------
+        # CONVERT TO FLOAT
+        # ----------------------------------------------
+
         ema_9 = float(ema_9)
         ema_21 = float(ema_21)
         ema_50 = float(ema_50)
@@ -136,16 +175,34 @@ class TradingStrategy:
             macd_histogram
         )
 
+        atr_14 = float(atr_14)
+
         volume_ratio = float(
             volume_ratio
         )
 
+        # ----------------------------------------------
+        # VALIDATE ATR
+        # ----------------------------------------------
+
+        if atr_14 <= 0:
+
+            return self._hold_signal(
+                "ATR is invalid.",
+                price,
+            )
+
+        # ----------------------------------------------
+        # CONDITION LISTS
+        # ----------------------------------------------
+
         buy_conditions = []
+
         sell_conditions = []
 
-        # --------------------------------------------
+        # ==================================================
         # TREND
-        # --------------------------------------------
+        # ==================================================
 
         bullish_trend = (
             ema_9 > ema_21
@@ -169,9 +226,9 @@ class TradingStrategy:
                 "EMA9 < EMA21 < EMA50"
             )
 
-        # --------------------------------------------
+        # ==================================================
         # RSI
-        # --------------------------------------------
+        # ==================================================
 
         bullish_rsi = (
             50 <= rsi < 70
@@ -193,9 +250,9 @@ class TradingStrategy:
                 f"RSI bearish ({rsi:.2f})"
             )
 
-        # --------------------------------------------
+        # ==================================================
         # MACD
-        # --------------------------------------------
+        # ==================================================
 
         bullish_macd = (
             macd > macd_signal
@@ -219,12 +276,13 @@ class TradingStrategy:
                 "MACD bearish"
             )
 
-        # --------------------------------------------
+        # ==================================================
         # VOLUME
-        # --------------------------------------------
+        # ==================================================
 
         strong_volume = (
-            volume_ratio >= self.volume_threshold
+            volume_ratio
+            >= self.volume_threshold
         )
 
         if strong_volume:
@@ -237,9 +295,9 @@ class TradingStrategy:
                 f"Volume strong ({volume_ratio:.2f}x)"
             )
 
-        # --------------------------------------------
-        # SIGNAL DECISION
-        # --------------------------------------------
+        # ==================================================
+        # SCORE
+        # ==================================================
 
         buy_score = self._calculate_score(
             bullish_trend,
@@ -255,7 +313,10 @@ class TradingStrategy:
             strong_volume,
         )
 
-        # BUY requires trend + momentum confirmation.
+        # ==================================================
+        # BUY
+        # ==================================================
+
         if (
             bullish_trend
             and bullish_macd
@@ -269,16 +330,25 @@ class TradingStrategy:
 
             return {
                 "action": "BUY",
+
                 "price": price,
+
                 "confidence": confidence,
+
                 "score": buy_score,
+
                 "reason": buy_conditions,
-                "indicators": self._indicator_snapshot(
-                    row
-                ),
+
+                "indicators":
+                    self._indicator_snapshot(
+                        row
+                    ),
             }
 
-        # SELL requires trend + momentum confirmation.
+        # ==================================================
+        # SELL
+        # ==================================================
+
         if (
             bearish_trend
             and bearish_macd
@@ -292,30 +362,50 @@ class TradingStrategy:
 
             return {
                 "action": "SELL",
+
                 "price": price,
+
                 "confidence": confidence,
+
                 "score": sell_score,
+
                 "reason": sell_conditions,
-                "indicators": self._indicator_snapshot(
-                    row
-                ),
+
+                "indicators":
+                    self._indicator_snapshot(
+                        row
+                    ),
             }
+
+        # ==================================================
+        # HOLD
+        # ==================================================
 
         return {
             "action": "HOLD",
+
             "price": price,
+
             "confidence": 0.0,
+
             "score": max(
                 buy_score,
                 sell_score,
             ),
+
             "reason": [
                 "No strong trading setup."
             ],
-            "indicators": self._indicator_snapshot(
-                row
-            ),
+
+            "indicators":
+                self._indicator_snapshot(
+                    row
+                ),
         }
+
+    # ==================================================
+    # SCORE
+    # ==================================================
 
     @staticmethod
     def _calculate_score(
@@ -341,6 +431,10 @@ class TradingStrategy:
 
         return score
 
+    # ==================================================
+    # CONFIDENCE
+    # ==================================================
+
     @staticmethod
     def _confidence(
         score: int,
@@ -359,37 +453,72 @@ class TradingStrategy:
             0.90,
         )
 
+    # ==================================================
+    # INDICATOR SNAPSHOT
+    # ==================================================
+
     @staticmethod
     def _indicator_snapshot(
         row,
     ) -> dict:
+        """
+        Return all indicator values needed by
+        the strategy, risk engine, and monitoring.
+        """
 
         return {
-            "ema_9": TradingStrategy._safe_float(
-                row["ema_9"]
-            ),
-            "ema_21": TradingStrategy._safe_float(
-                row["ema_21"]
-            ),
-            "ema_50": TradingStrategy._safe_float(
-                row["ema_50"]
-            ),
-            "rsi_14": TradingStrategy._safe_float(
-                row["rsi_14"]
-            ),
-            "macd": TradingStrategy._safe_float(
-                row["macd"]
-            ),
-            "macd_signal": TradingStrategy._safe_float(
-                row["macd_signal"]
-            ),
-            "macd_histogram": TradingStrategy._safe_float(
-                row["macd_histogram"]
-            ),
-            "volume_ratio": TradingStrategy._safe_float(
-                row["volume_ratio"]
-            ),
+            "ema_9":
+                TradingStrategy._safe_float(
+                    row["ema_9"]
+                ),
+
+            "ema_21":
+                TradingStrategy._safe_float(
+                    row["ema_21"]
+                ),
+
+            "ema_50":
+                TradingStrategy._safe_float(
+                    row["ema_50"]
+                ),
+
+            "rsi_14":
+                TradingStrategy._safe_float(
+                    row["rsi_14"]
+                ),
+
+            "macd":
+                TradingStrategy._safe_float(
+                    row["macd"]
+                ),
+
+            "macd_signal":
+                TradingStrategy._safe_float(
+                    row["macd_signal"]
+                ),
+
+            "macd_histogram":
+                TradingStrategy._safe_float(
+                    row["macd_histogram"]
+                ),
+
+            # IMPORTANT:
+            # RiskEngine uses ATR for
+            # position sizing and SL/TP.
+            "atr_14":
+                TradingStrategy._safe_float(
+                    row["atr_14"]
+                ),
+
+            "volume_ratio":
+                TradingStrategy._safe_float(
+                    row["volume_ratio"]
+                ),
         }
+
+    # ==================================================
+    # SAFE FLOAT
+    # ==================================================
 
     @staticmethod
     def _safe_float(
@@ -401,11 +530,20 @@ class TradingStrategy:
 
         try:
 
-            return float(value)
+            value = float(value)
 
-        except (TypeError, ValueError):
+        except (
+            TypeError,
+            ValueError,
+        ):
 
             return None
+
+        return value
+
+    # ==================================================
+    # HOLD SIGNAL
+    # ==================================================
 
     @staticmethod
     def _hold_signal(
@@ -415,9 +553,16 @@ class TradingStrategy:
 
         return {
             "action": "HOLD",
+
             "price": price,
+
             "confidence": 0.0,
+
             "score": 0,
-            "reason": [reason],
+
+            "reason": [
+                reason
+            ],
+
             "indicators": {},
         }

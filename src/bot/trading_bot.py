@@ -42,6 +42,7 @@ class TradingBot:
         take_profit_atr_multiplier: float = 2.0,
         max_position_percentage: float = 0.25,
         fee_rate: float = 0.001,
+        minimum_expected_net_return_percentage: float = 0.30,
     ):
         self.symbol = symbol.upper()
 
@@ -83,7 +84,9 @@ class TradingBot:
             fee_rate=fee_rate,
             estimated_slippage_rate=0.0002,
             minimum_expected_net_profit=0.0,
-            minimum_expected_net_return_percentage=0.30,
+            minimum_expected_net_return_percentage=(
+                minimum_expected_net_return_percentage
+            ),
         )
 
         # --------------------------------------------------

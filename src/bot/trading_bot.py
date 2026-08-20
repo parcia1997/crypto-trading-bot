@@ -30,6 +30,8 @@ class TradingBot:
         PaperExecutionEngine
             ↓
         Portfolio
+            ↓
+        PostgreSQL Trade / Account Storage
 
     IMPORTANT:
     This version is PAPER TRADING ONLY.
@@ -38,7 +40,10 @@ class TradingBot:
     Database behavior:
 
         enable_database=True
-            -> candles and signals saved to PostgreSQL
+            -> save live candles
+            -> save signals
+            -> save completed trades
+            -> save account snapshots
 
         enable_database=False
             -> no PostgreSQL writes
@@ -69,11 +74,7 @@ class TradingBot:
         max_position_percentage: float = 0.25,
         fee_rate: float = 0.001,
         minimum_expected_net_return_percentage: float = 0.30,
-
-        # PostgreSQL
         enable_database: bool = True,
-
-        # Candle interval stored in database
         interval: str = "1m",
     ):
 
@@ -96,6 +97,10 @@ class TradingBot:
         # ==================================================
 
         self.repository = None
+
+        # Track how many completed paper trades
+        # have already been persisted.
+        self.saved_trade_count = 0
 
         if self.enable_database:
 
@@ -151,11 +156,9 @@ class TradingBot:
                 max_position_percentage
             ),
 
-            # Binance fee assumption:
             # 0.001 = 0.10% per side
             fee_rate=fee_rate,
 
-            # Estimated slippage:
             # 0.0002 = 0.02% per side
             estimated_slippage_rate=0.0002,
 
@@ -213,11 +216,8 @@ class TradingBot:
         """
         Load historical candles into CandleStore.
 
-        Historical warm-up candles are NOT automatically
-        written to PostgreSQL here.
-
-        This avoids inserting hundreds or thousands of
-        historical candles every time the bot starts.
+        Historical warm-up candles are not
+        automatically written to PostgreSQL.
         """
 
         self.candle_store.load(
@@ -242,19 +242,12 @@ class TradingBot:
         Process one completed candle.
 
         Live mode:
-
             use_ohlc_execution=False
-                ↓
-            update_price(close)
+            -> update_price(close)
 
         Backtest mode:
-
             use_ohlc_execution=True
-                ↓
-            update_candle(candle)
-                ↓
-            High checks Take Profit
-            Low checks Stop Loss
+            -> update_candle(candle)
         """
 
         self.candles_processed += 1
@@ -312,7 +305,7 @@ class TradingBot:
             )
 
         # ==================================================
-        # GET ALL AVAILABLE CANDLES
+        # GET CANDLE HISTORY
         # ==================================================
 
         candles = (
@@ -324,7 +317,7 @@ class TradingBot:
         )
 
         # ==================================================
-        # UPDATE PORTFOLIO MARKET PRICE
+        # UPDATE PORTFOLIO PRICE
         # ==================================================
 
         self.portfolio.update_price(
@@ -366,11 +359,15 @@ class TradingBot:
 
             self._sync_portfolio_after_close()
 
-            # Update RiskEngine balance after
-            # realized profit or loss.
             self.risk_engine.update_account_balance(
                 self.paper_engine.equity()
             )
+
+            # Save newly completed trade.
+            self._save_new_trades()
+
+            # Save account state after closing trade.
+            self._save_account_snapshot()
 
         # ==================================================
         # STRATEGY
@@ -383,7 +380,7 @@ class TradingBot:
         )
 
         # ==================================================
-        # SAVE SIGNAL TO POSTGRESQL
+        # SAVE SIGNAL
         # ==================================================
 
         if (
@@ -498,7 +495,7 @@ class TradingBot:
             }
 
         # ==================================================
-        # UPDATE RISK ENGINE ACCOUNT BALANCE
+        # UPDATE RISK ENGINE BALANCE
         # ==================================================
 
         current_equity = (
@@ -518,10 +515,6 @@ class TradingBot:
                 signal
             )
         )
-
-        # ==================================================
-        # RISK LOG
-        # ==================================================
 
         logger.info(
             "RISK | "
@@ -717,16 +710,13 @@ class TradingBot:
 
             return {
                 "action": "BUY",
-
                 "executed": False,
-
                 "reason": [
                     result.get(
                         "reason",
                         "Paper execution failed.",
                     )
                 ],
-
                 "risk": risk_result,
             }
 
@@ -756,25 +746,29 @@ class TradingBot:
                 "successful paper execution."
             )
 
-            # Immediately close paper position
-            # so execution and portfolio state
-            # do not diverge.
             self.paper_engine.close_position(
                 price=entry_price,
                 reason="PORTFOLIO_SYNC_FAILURE",
             )
 
+            # Save this forced close too.
+            self._save_new_trades()
+            self._save_account_snapshot()
+
             return {
                 "action": "BUY",
-
                 "executed": False,
-
                 "reason": [
                     "Portfolio synchronization failed."
                 ],
-
                 "risk": risk_result,
             }
+
+        # ==================================================
+        # SAVE ACCOUNT SNAPSHOT AFTER BUY
+        # ==================================================
+
+        self._save_account_snapshot()
 
         # ==================================================
         # BUY LOG
@@ -887,6 +881,106 @@ class TradingBot:
         }
 
     # ======================================================
+    # SAVE COMPLETED TRADES
+    # ======================================================
+
+    def _save_new_trades(
+        self,
+    ):
+        """
+        Save newly completed trades to PostgreSQL.
+
+        saved_trade_count prevents duplicate inserts.
+        """
+
+        if (
+            not self.enable_database
+            or self.repository is None
+        ):
+
+            return
+
+        trade_history = (
+            self.paper_engine.trade_history
+        )
+
+        while (
+            self.saved_trade_count
+            < len(trade_history)
+        ):
+
+            trade = trade_history[
+                self.saved_trade_count
+            ]
+
+            trade_id = (
+                self.repository.save_trade(
+                    trade
+                )
+            )
+
+            if trade_id is None:
+
+                logger.error(
+                    "DATABASE | Failed to save trade."
+                )
+
+                break
+
+            logger.info(
+                "DATABASE | "
+                "Trade saved | id=%s | "
+                "net_pnl=%.4f",
+                trade_id,
+                trade.net_pnl,
+            )
+
+            self.saved_trade_count += 1
+
+    # ======================================================
+    # SAVE ACCOUNT SNAPSHOT
+    # ======================================================
+
+    def _save_account_snapshot(
+        self,
+    ):
+        """
+        Save current paper account state to PostgreSQL.
+        """
+
+        if (
+            not self.enable_database
+            or self.repository is None
+        ):
+
+            return
+
+        status = (
+            self.paper_engine.account_status()
+        )
+
+        snapshot_id = (
+            self.repository.save_account_snapshot(
+                status
+            )
+        )
+
+        if snapshot_id is None:
+
+            logger.error(
+                "DATABASE | "
+                "Failed to save account snapshot."
+            )
+
+            return
+
+        logger.debug(
+            "DATABASE | "
+            "Account snapshot saved | id=%s",
+            snapshot_id,
+        )
+
+    # ======================================================
     # PORTFOLIO CLOSE SYNCHRONIZATION
     # ======================================================
 
@@ -897,11 +991,8 @@ class TradingBot:
         Synchronize Portfolio after
         PaperExecutionEngine closes a position.
 
-        Portfolio already charged BUY fee
-        during open_position().
-
-        Therefore only SELL fee is passed
-        during close_position().
+        Portfolio charged BUY fee at open.
+        Therefore only SELL fee is charged here.
         """
 
         trade_history = (
@@ -909,6 +1000,7 @@ class TradingBot:
         )
 
         if not trade_history:
+
             return
 
         latest_trade = (
@@ -923,35 +1015,19 @@ class TradingBot:
 
             return
 
-        # ==================================================
-        # UPDATE EXIT PRICE
-        # ==================================================
-
         self.portfolio.update_price(
             latest_trade.exit_price
         )
-
-        # ==================================================
-        # CALCULATE EXIT VALUE
-        # ==================================================
 
         exit_value = (
             latest_trade.quantity
             * latest_trade.exit_price
         )
 
-        # ==================================================
-        # SELL FEE ONLY
-        # ==================================================
-
         exit_fee = (
             exit_value
             * self.paper_engine.fee_rate
         )
-
-        # ==================================================
-        # CLOSE PORTFOLIO
-        # ==================================================
 
         portfolio_pnl = (
             self.portfolio.close_position(
@@ -984,9 +1060,6 @@ class TradingBot:
     def status(
         self,
     ) -> dict:
-        """
-        Detailed bot status.
-        """
 
         account = (
             self.paper_engine.account_status()
@@ -1024,6 +1097,9 @@ class TradingBot:
             "rejected_trades":
                 self.rejected_trades,
 
+            "saved_trade_count":
+                self.saved_trade_count,
+
             "account":
                 account,
 
@@ -1038,9 +1114,6 @@ class TradingBot:
     def summary(
         self,
     ) -> dict:
-        """
-        Compact bot summary.
-        """
 
         account = (
             self.paper_engine.account_status()
@@ -1094,6 +1167,9 @@ class TradingBot:
             "rejected_trades":
                 self.rejected_trades,
 
+            "saved_trade_count":
+                self.saved_trade_count,
+
             "database_enabled":
                 self.enable_database,
         }
@@ -1105,9 +1181,6 @@ class TradingBot:
     def start(
         self,
     ):
-        """
-        Start bot.
-        """
 
         self.running = True
 
@@ -1126,11 +1199,12 @@ class TradingBot:
     def stop(
         self,
     ):
-        """
-        Stop bot.
-        """
 
         self.running = False
+
+        # Final attempt in case a completed trade
+        # was not yet persisted.
+        self._save_new_trades()
 
         logger.info(
             "TradingBot stopped."

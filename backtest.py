@@ -52,6 +52,10 @@ async def main():
         symbol="ETHUSDT",
         starting_balance=1000.0,
         warmup_candles=50,
+        timeframe="1m",
+
+        # Save one summary row
+        save_result_to_database=True,
     )
 
     result = backtester.run(

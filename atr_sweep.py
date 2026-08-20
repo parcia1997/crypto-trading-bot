@@ -119,6 +119,8 @@ async def main():
             symbol=SYMBOL,
             starting_balance=STARTING_BALANCE,
             warmup_candles=50,
+            timeframe="1m",
+            save_result_to_database=False,
         )
 
         # ----------------------------------------------------

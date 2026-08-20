@@ -71,11 +71,22 @@ class TradingBot:
         # --------------------------------------------------
 
         self.risk_engine = RiskEngine(
-            account_balance=starting_balance,
-            risk_per_trade=risk_per_trade,
-            stop_loss_atr_multiplier=stop_loss_atr_multiplier,
-            take_profit_atr_multiplier=take_profit_atr_multiplier,
-            max_position_percentage=max_position_percentage,
+        account_balance=starting_balance,
+        risk_per_trade=risk_per_trade,
+        stop_loss_atr_multiplier=stop_loss_atr_multiplier,
+        take_profit_atr_multiplier=take_profit_atr_multiplier,
+        max_position_percentage=max_position_percentage,
+
+        # Binance-style paper trading fee
+        fee_rate=fee_rate,
+
+        # Keep 0 while testing.
+        # Later we can simulate slippage.
+        estimated_slippage_rate=0.0,
+
+        # Reject trades that are not profitable
+        # after estimated BUY + SELL fees.
+        minimum_expected_net_profit=0.0,
         )
 
         # --------------------------------------------------
@@ -270,12 +281,25 @@ class TradingBot:
 
         logger.info(
             "RISK | approved=%s | action=%s | "
-            "size=%.8f | SL=%s | TP=%s",
+            "size=%.8f | SL=%s | TP=%s | "
+            "gross_profit=%.4f | "
+            "fees=%.4f | "
+            "slippage=%.4f | "
+            "net_profit=%.4f | "
+            "net_return=%.4f%%",
             risk_result["approved"],
             risk_result["action"],
             risk_result["position_size"],
             risk_result["stop_loss"],
             risk_result["take_profit"],
+            risk_result.get("expected_gross_profit", 0.0),
+            risk_result.get("total_fees", 0.0),
+            risk_result.get("estimated_slippage", 0.0),
+            risk_result.get("expected_net_profit", 0.0),
+            risk_result.get(
+                "expected_net_return_percentage",
+                0.0,
+            ),
         )
 
         # --------------------------------------------------
@@ -463,11 +487,19 @@ class TradingBot:
             latest_trade.exit_price
         )
 
-        portfolio_pnl = (
-            self.portfolio.close_position(
-                price=latest_trade.exit_price,
-                fee=latest_trade.fees,
-            )
+        exit_value = (
+    latest_trade.quantity
+    * latest_trade.exit_price
+)
+
+        exit_fee = (
+            exit_value
+            * self.paper_engine.fee_rate
+        )
+
+        self.portfolio.close_position(
+            price=latest_trade.exit_price,
+            fee=exit_fee,
         )
 
         logger.info(

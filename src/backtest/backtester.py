@@ -78,10 +78,9 @@ class Backtester:
             self.warmup_candles:
         ]:
 
-            result = (
-                self.bot.process_candle(
-                    candle
-                )
+            result = self.bot.process_candle(
+                candle,
+                use_ohlc_execution=True,
             )
 
             # ----------------------------------------------

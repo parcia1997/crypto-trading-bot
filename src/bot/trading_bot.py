@@ -1,5 +1,4 @@
 import logging
-from typing import Optional
 
 from src.market.candle_store import CandleStore
 from src.strategy.strategy import TradingStrategy
@@ -13,9 +12,9 @@ logger = logging.getLogger(__name__)
 
 class TradingBot:
     """
-    Main trading bot controller.
+    Main ETH/USDT paper trading bot controller.
 
-    Connects:
+    Flow:
 
         CandleStore
             ↓
@@ -32,6 +31,10 @@ class TradingBot:
     It does not send real orders to Binance.
     """
 
+    # ======================================================
+    # INITIALIZATION
+    # ======================================================
+
     def __init__(
         self,
         symbol: str = "ETHUSDT",
@@ -45,6 +48,7 @@ class TradingBot:
         max_position_percentage: float = 0.25,
         fee_rate: float = 0.001,
     ):
+
         self.symbol = symbol.upper()
 
         self.starting_balance = starting_balance
@@ -67,26 +71,40 @@ class TradingBot:
         )
 
         # --------------------------------------------------
-        # RISK
+        # RISK ENGINE
         # --------------------------------------------------
 
         self.risk_engine = RiskEngine(
-        account_balance=starting_balance,
-        risk_per_trade=risk_per_trade,
-        stop_loss_atr_multiplier=stop_loss_atr_multiplier,
-        take_profit_atr_multiplier=take_profit_atr_multiplier,
-        max_position_percentage=max_position_percentage,
+            account_balance=starting_balance,
 
-        # Binance-style paper trading fee
-        fee_rate=fee_rate,
+            risk_per_trade=risk_per_trade,
 
-        # Keep 0 while testing.
-        # Later we can simulate slippage.
-        estimated_slippage_rate=0.0,
+            stop_loss_atr_multiplier=(
+                stop_loss_atr_multiplier
+            ),
 
-        # Reject trades that are not profitable
-        # after estimated BUY + SELL fees.
-        minimum_expected_net_profit=0.0,
+            take_profit_atr_multiplier=(
+                take_profit_atr_multiplier
+            ),
+
+            max_position_percentage=(
+                max_position_percentage
+            ),
+
+            # Same fee assumption used
+            # by PaperExecutionEngine.
+            fee_rate=fee_rate,
+
+            # 0.02% estimated slippage per side.
+            estimated_slippage_rate=0.0002,
+
+            # Trade must at least have
+            # positive expected net profit.
+            minimum_expected_net_profit=0.0,
+
+            # Require at least 0.30% expected
+            # return AFTER fees + slippage.
+            minimum_expected_net_return_percentage=0.30,
         )
 
         # --------------------------------------------------
@@ -112,15 +130,40 @@ class TradingBot:
         # --------------------------------------------------
 
         self.candles_processed = 0
+
         self.buy_signals = 0
+
         self.sell_signals = 0
+
         self.hold_signals = 0
+
         self.rejected_trades = 0
 
         self.running = False
 
     # ======================================================
-    # CANDLE PROCESSING
+    # LOAD HISTORICAL CANDLES
+    # ======================================================
+
+    def load_historical_candles(
+        self,
+        candles: list[dict],
+    ):
+        """
+        Load historical candles into CandleStore.
+        """
+
+        self.candle_store.load(
+            candles
+        )
+
+        logger.info(
+            "TradingBot historical candles loaded | count=%s",
+            self.candle_store.count(),
+        )
+
+    # ======================================================
+    # PROCESS COMPLETED CANDLE
     # ======================================================
 
     def process_candle(
@@ -128,7 +171,7 @@ class TradingBot:
         candle: dict,
     ) -> dict:
         """
-        Process one completed candle.
+        Process one completed 1-minute candle.
 
         Flow:
 
@@ -136,26 +179,29 @@ class TradingBot:
               ↓
             Store
               ↓
-          Strategy
+        Update Position
               ↓
-            Risk
+           Strategy
               ↓
-           Execute
+          Risk Engine
               ↓
-          Portfolio
+        Paper Execution
+              ↓
+           Portfolio
         """
 
         self.candles_processed += 1
 
         logger.info(
-            "Processing candle #%s | %s | close=%.2f",
+            "Processing candle #%s | "
+            "%s | close=%.2f",
             self.candles_processed,
             candle.get("timestamp"),
-            candle.get("close"),
+            float(candle.get("close", 0.0)),
         )
 
         # --------------------------------------------------
-        # STORE CANDLE
+        # STORE LIVE CANDLE
         # --------------------------------------------------
 
         added = self.candle_store.add(
@@ -166,17 +212,69 @@ class TradingBot:
 
             return {
                 "action": "HOLD",
-                "reason": "Invalid candle.",
+                "executed": False,
+                "reason": [
+                    "Invalid candle."
+                ],
             }
 
-        candles = self.candle_store.get_all()
+        candles = (
+            self.candle_store.get_all()
+        )
+
+        market_price = float(
+            candle["close"]
+        )
+
+        # --------------------------------------------------
+        # UPDATE CURRENT MARKET PRICE
+        # --------------------------------------------------
+
+        self.portfolio.update_price(
+            market_price
+        )
+
+        # --------------------------------------------------
+        # CHECK EXISTING PAPER POSITION
+        #
+        # This can trigger TP / SL.
+        # --------------------------------------------------
+
+        execution_update = (
+            self.paper_engine.update_price(
+                market_price
+            )
+        )
+
+        # --------------------------------------------------
+        # POSITION CLOSED BY TP / SL
+        # --------------------------------------------------
+
+        if execution_update.get(
+            "closed"
+        ):
+
+            logger.info(
+                "POSITION CLOSED | %s",
+                execution_update,
+            )
+
+            self._sync_portfolio_after_close()
+
+            # Update RiskEngine balance after
+            # realized profit/loss.
+            self.risk_engine.update_account_balance(
+                self.paper_engine.equity()
+            )
 
         # --------------------------------------------------
         # STRATEGY
         # --------------------------------------------------
 
-        signal = self.strategy.generate_signal(
-            candles
+        signal = (
+            self.strategy.generate_signal(
+                candles
+            )
         )
 
         action = signal.get(
@@ -190,9 +288,14 @@ class TradingBot:
         )
 
         logger.info(
-            "STRATEGY | action=%s | confidence=%.2f | reason=%s",
+            "STRATEGY | "
+            "action=%s | "
+            "confidence=%.2f | "
+            "score=%s | "
+            "reason=%s",
             action,
             confidence,
+            signal.get("score", 0),
             signal.get("reason"),
         )
 
@@ -201,43 +304,19 @@ class TradingBot:
         # --------------------------------------------------
 
         if action == "BUY":
+
             self.buy_signals += 1
 
         elif action == "SELL":
+
             self.sell_signals += 1
 
         else:
+
             self.hold_signals += 1
 
         # --------------------------------------------------
-        # UPDATE CURRENT PAPER POSITION
-        # --------------------------------------------------
-
-        market_price = float(
-            candle["close"]
-        )
-
-        execution_update = (
-            self.paper_engine.update_price(
-                market_price
-            )
-        )
-
-        # --------------------------------------------------
-        # POSITION CLOSED
-        # --------------------------------------------------
-
-        if execution_update.get("closed"):
-
-            logger.info(
-                "POSITION CLOSED | %s",
-                execution_update,
-            )
-
-            self._sync_portfolio_after_close()
-
-        # --------------------------------------------------
-        # DON'T OPEN ANOTHER POSITION
+        # EXISTING POSITION
         # --------------------------------------------------
 
         if self.paper_engine.position is not None:
@@ -256,7 +335,20 @@ class TradingBot:
             }
 
         # --------------------------------------------------
-        # ONLY BUY/SELL CONTINUE
+        # HOLD
+        # --------------------------------------------------
+
+        if action == "HOLD":
+
+            return {
+                "action": "HOLD",
+                "executed": False,
+                "signal": signal,
+                "execution": execution_update,
+            }
+
+        # --------------------------------------------------
+        # ONLY BUY / SELL CONTINUE
         # --------------------------------------------------
 
         if action not in {
@@ -271,31 +363,75 @@ class TradingBot:
                 "execution": execution_update,
             }
 
-        # --------------------------------------------------
-        # RISK ENGINE
-        # --------------------------------------------------
+        # ==================================================
+        # UPDATE RISK ENGINE ACCOUNT BALANCE
+        # ==================================================
 
-        risk_result = self.risk_engine.evaluate(
-            signal
+        current_equity = (
+            self.paper_engine.equity()
         )
 
+        self.risk_engine.update_account_balance(
+            current_equity
+        )
+
+        # ==================================================
+        # RISK ENGINE
+        # ==================================================
+
+        risk_result = (
+            self.risk_engine.evaluate(
+                signal
+            )
+        )
+
+        # --------------------------------------------------
+        # RISK LOG
+        # --------------------------------------------------
+
         logger.info(
-            "RISK | approved=%s | action=%s | "
-            "size=%.8f | SL=%s | TP=%s | "
-            "gross_profit=%.4f | "
+            "RISK | "
+            "approved=%s | "
+            "action=%s | "
+            "size=%.8f | "
+            "SL=%s | "
+            "TP=%s | "
+            "gross=%.4f | "
             "fees=%.4f | "
             "slippage=%.4f | "
-            "net_profit=%.4f | "
+            "net=%.4f | "
             "net_return=%.4f%%",
+
             risk_result["approved"],
+
             risk_result["action"],
+
             risk_result["position_size"],
+
             risk_result["stop_loss"],
+
             risk_result["take_profit"],
-            risk_result.get("expected_gross_profit", 0.0),
-            risk_result.get("total_fees", 0.0),
-            risk_result.get("estimated_slippage", 0.0),
-            risk_result.get("expected_net_profit", 0.0),
+
+            risk_result.get(
+                "expected_gross_profit",
+                0.0,
+            ),
+
+            risk_result.get(
+                "total_fees",
+                0.0,
+            ),
+
+            risk_result.get(
+                "estimated_slippage",
+                0.0,
+            ),
+
+            risk_result.get(
+                "expected_net_profit",
+                0.0,
+            ),
+
             risk_result.get(
                 "expected_net_return_percentage",
                 0.0,
@@ -306,13 +442,17 @@ class TradingBot:
         # TRADE REJECTED
         # --------------------------------------------------
 
-        if not risk_result["approved"]:
+        if not risk_result[
+            "approved"
+        ]:
 
             self.rejected_trades += 1
 
             logger.info(
                 "TRADE REJECTED | %s",
-                risk_result["reason"],
+                risk_result.get(
+                    "reason"
+                ),
             )
 
             return {
@@ -323,10 +463,12 @@ class TradingBot:
             }
 
         # --------------------------------------------------
-        # PAPER BUY
+        # BUY
         # --------------------------------------------------
 
-        if risk_result["action"] == "BUY":
+        if risk_result[
+            "action"
+        ] == "BUY":
 
             return self._execute_buy(
                 risk_result
@@ -336,11 +478,19 @@ class TradingBot:
         # SELL
         # --------------------------------------------------
 
-        if risk_result["action"] == "SELL":
+        if risk_result[
+            "action"
+        ] == "SELL":
 
             logger.info(
                 "SELL signal received."
             )
+
+            # Current PaperExecutionEngine
+            # is LONG-only.
+            #
+            # SELL cannot create a SHORT
+            # position yet.
 
             return {
                 "action": "SELL",
@@ -361,7 +511,7 @@ class TradingBot:
         }
 
     # ======================================================
-    # BUY EXECUTION
+    # EXECUTE BUY
     # ======================================================
 
     def _execute_buy(
@@ -369,7 +519,7 @@ class TradingBot:
         risk_result: dict,
     ) -> dict:
         """
-        Execute an approved BUY using paper trading.
+        Execute an approved BUY as a paper trade.
         """
 
         quantity = risk_result[
@@ -388,11 +538,17 @@ class TradingBot:
             "take_profit"
         ]
 
-        result = self.paper_engine.open_long(
-            quantity=quantity,
-            entry_price=entry_price,
-            stop_loss=stop_loss,
-            take_profit=take_profit,
+        # --------------------------------------------------
+        # PAPER EXECUTION
+        # --------------------------------------------------
+
+        result = (
+            self.paper_engine.open_long(
+                quantity=quantity,
+                entry_price=entry_price,
+                stop_loss=stop_loss,
+                take_profit=take_profit,
+            )
         )
 
         logger.info(
@@ -400,7 +556,13 @@ class TradingBot:
             result,
         )
 
-        if not result.get("success"):
+        # --------------------------------------------------
+        # EXECUTION FAILED
+        # --------------------------------------------------
+
+        if not result.get(
+            "success"
+        ):
 
             logger.warning(
                 "Paper execution failed | %s",
@@ -434,6 +596,10 @@ class TradingBot:
             )
         )
 
+        # --------------------------------------------------
+        # SAFETY CHECK
+        # --------------------------------------------------
+
         if not portfolio_result:
 
             logger.error(
@@ -441,27 +607,137 @@ class TradingBot:
                 "successful paper execution."
             )
 
+            # Close execution position immediately
+            # to prevent the two components
+            # becoming inconsistent.
+
+            self.paper_engine.close_position(
+                price=entry_price,
+                reason="PORTFOLIO_SYNC_FAILURE",
+            )
+
+            return {
+                "action": "BUY",
+                "executed": False,
+                "reason": [
+                    "Portfolio synchronization failed."
+                ],
+                "risk": risk_result,
+            }
+
+        # --------------------------------------------------
+        # BUY LOG
+        # --------------------------------------------------
+
+        logger.info(
+            "PAPER BUY OPENED | "
+            "quantity=%.8f | "
+            "entry=%.2f | "
+            "SL=%.2f | "
+            "TP=%.2f | "
+            "expected_gross=%.4f | "
+            "expected_fees=%.4f | "
+            "expected_slippage=%.4f | "
+            "expected_net=%.4f | "
+            "net_return=%.4f%%",
+
+            quantity,
+
+            entry_price,
+
+            stop_loss,
+
+            take_profit,
+
+            risk_result.get(
+                "expected_gross_profit",
+                0.0,
+            ),
+
+            risk_result.get(
+                "total_fees",
+                0.0,
+            ),
+
+            risk_result.get(
+                "estimated_slippage",
+                0.0,
+            ),
+
+            risk_result.get(
+                "expected_net_profit",
+                0.0,
+            ),
+
+            risk_result.get(
+                "expected_net_return_percentage",
+                0.0,
+            ),
+        )
+
         return {
             "action": "BUY",
+
             "executed": True,
+
             "quantity": quantity,
+
             "entry_price": entry_price,
+
             "stop_loss": stop_loss,
+
             "take_profit": take_profit,
+
+            "expected_gross_profit":
+                risk_result.get(
+                    "expected_gross_profit",
+                    0.0,
+                ),
+
+            "expected_total_fees":
+                risk_result.get(
+                    "total_fees",
+                    0.0,
+                ),
+
+            "expected_slippage":
+                risk_result.get(
+                    "estimated_slippage",
+                    0.0,
+                ),
+
+            "expected_net_profit":
+                risk_result.get(
+                    "expected_net_profit",
+                    0.0,
+                ),
+
+            "expected_net_return_percentage":
+                risk_result.get(
+                    "expected_net_return_percentage",
+                    0.0,
+                ),
+
             "risk": risk_result,
+
             "execution": result,
         }
 
     # ======================================================
-    # PORTFOLIO CLOSE SYNC
+    # PORTFOLIO CLOSE SYNCHRONIZATION
     # ======================================================
 
     def _sync_portfolio_after_close(
         self,
     ):
         """
-        Synchronize Portfolio after the paper
-        execution engine closes a position.
+        Synchronize Portfolio after
+        PaperExecutionEngine closes a position.
+
+        Portfolio already charged the BUY fee
+        when the position was opened.
+
+        Therefore we charge ONLY the SELL fee here.
         """
 
         trade_history = (
@@ -469,12 +745,13 @@ class TradingBot:
         )
 
         if not trade_history:
+
             return
 
-        latest_trade = trade_history[-1]
+        latest_trade = (
+            trade_history[-1]
+        )
 
-        # Portfolio should have the same
-        # position before closing.
         if not self.portfolio.has_position():
 
             logger.warning(
@@ -483,37 +760,69 @@ class TradingBot:
 
             return
 
+        # --------------------------------------------------
+        # UPDATE PRICE
+        # --------------------------------------------------
+
         self.portfolio.update_price(
             latest_trade.exit_price
         )
 
+        # --------------------------------------------------
+        # EXIT VALUE
+        # --------------------------------------------------
+
         exit_value = (
-    latest_trade.quantity
-    * latest_trade.exit_price
-)
+            latest_trade.quantity
+            * latest_trade.exit_price
+        )
+
+        # --------------------------------------------------
+        # SELL FEE ONLY
+        # --------------------------------------------------
 
         exit_fee = (
             exit_value
             * self.paper_engine.fee_rate
         )
 
-        self.portfolio.close_position(
-            price=latest_trade.exit_price,
-            fee=exit_fee,
+        # --------------------------------------------------
+        # CLOSE PORTFOLIO POSITION
+        # --------------------------------------------------
+
+        portfolio_pnl = (
+            self.portfolio.close_position(
+                price=latest_trade.exit_price,
+                fee=exit_fee,
+            )
         )
 
         logger.info(
-            "PORTFOLIO CLOSED | net_pnl=%s",
-            portfolio_pnl,
+            "PORTFOLIO CLOSED | "
+            "exit_price=%.2f | "
+            "exit_fee=%.4f | "
+            "net_pnl=%.4f",
+
+            latest_trade.exit_price,
+
+            exit_fee,
+
+            (
+                portfolio_pnl
+                if portfolio_pnl is not None
+                else 0.0
+            ),
         )
 
     # ======================================================
     # STATUS
     # ======================================================
 
-    def status(self) -> dict:
+    def status(
+        self,
+    ) -> dict:
         """
-        Return complete bot status.
+        Return detailed bot status.
         """
 
         account = (
@@ -525,8 +834,11 @@ class TradingBot:
         )
 
         return {
-            "symbol": self.symbol,
-            "running": self.running,
+            "symbol":
+                self.symbol,
+
+            "running":
+                self.running,
 
             "candles_processed":
                 self.candles_processed,
@@ -557,7 +869,9 @@ class TradingBot:
     # SUMMARY
     # ======================================================
 
-    def summary(self) -> dict:
+    def summary(
+        self,
+    ) -> dict:
         """
         Compact trading summary.
         """
@@ -567,34 +881,63 @@ class TradingBot:
         )
 
         return {
-            "symbol": self.symbol,
-            "balance": account["cash"],
-            "equity": account["equity"],
-            "realized_pnl": account[
-                "realized_pnl"
-            ],
-            "unrealized_pnl": account[
-                "unrealized_pnl"
-            ],
-            "total_return": account[
-                "total_return"
-            ],
-            "trades": account[
-                "total_trades"
-            ],
-            "candles": self.candles_processed,
-            "buy_signals": self.buy_signals,
-            "sell_signals": self.sell_signals,
-            "hold_signals": self.hold_signals,
+            "symbol":
+                self.symbol,
+
+            "balance":
+                account["cash"],
+
+            "equity":
+                account["equity"],
+
+            "realized_pnl":
+                account[
+                    "realized_pnl"
+                ],
+
+            "unrealized_pnl":
+                account[
+                    "unrealized_pnl"
+                ],
+
+            "total_return":
+                account[
+                    "total_return"
+                ],
+
+            "trades":
+                account[
+                    "total_trades"
+                ],
+
+            "candles":
+                self.candles_processed,
+
+            "total_candles_available":
+                self.candle_store.count(),
+
+            "buy_signals":
+                self.buy_signals,
+
+            "sell_signals":
+                self.sell_signals,
+
+            "hold_signals":
+                self.hold_signals,
+
+            "rejected_trades":
+                self.rejected_trades,
         }
 
     # ======================================================
-    # START / STOP
+    # START
     # ======================================================
 
-    def start(self):
+    def start(
+        self,
+    ):
         """
-        Mark bot as running.
+        Mark TradingBot as running.
         """
 
         self.running = True
@@ -604,9 +947,15 @@ class TradingBot:
             self.symbol,
         )
 
-    def stop(self):
+    # ======================================================
+    # STOP
+    # ======================================================
+
+    def stop(
+        self,
+    ):
         """
-        Stop the bot.
+        Stop TradingBot.
         """
 
         self.running = False

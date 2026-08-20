@@ -10,19 +10,15 @@ class RiskEngine:
     Fee-aware risk management engine.
 
     Responsibilities:
-
-    - Position sizing
-    - Stop loss
-    - Take profit
-    - Risk/reward validation
-    - Maximum position limit
-    - BUY fee estimation
-    - SELL fee estimation
-    - Slippage estimation
-    - Expected gross profit
-    - Expected net profit
-    - Reject trades where expected profit
-      does not cover trading costs
+        - Position sizing
+        - Stop loss
+        - Take profit
+        - Risk/reward validation
+        - Maximum position limit
+        - Entry/exit fee estimation
+        - Slippage estimation
+        - Expected gross/net profit
+        - Minimum net-return filter
 
     This class DOES NOT execute orders.
     """
@@ -36,18 +32,11 @@ class RiskEngine:
         max_position_percentage: float = 0.25,
         minimum_risk_reward: float = 2.0,
         minimum_position_size: float = 0.0001,
-
-        # ------------------------------------------
-        # Trading costs
-        # ------------------------------------------
-
         fee_rate: float = 0.001,
-
-        estimated_slippage_rate: float = 0.0,
-
+        estimated_slippage_rate: float = 0.0002,
         minimum_expected_net_profit: float = 0.0,
+        minimum_expected_net_return_percentage: float = 0.30,
     ):
-
         if account_balance <= 0:
             raise ValueError(
                 "Account balance must be greater than 0."
@@ -73,6 +62,16 @@ class RiskEngine:
                 "max_position_percentage must be between 0 and 1."
             )
 
+        if minimum_risk_reward <= 0:
+            raise ValueError(
+                "minimum_risk_reward must be greater than 0."
+            )
+
+        if minimum_position_size <= 0:
+            raise ValueError(
+                "minimum_position_size must be greater than 0."
+            )
+
         if fee_rate < 0:
             raise ValueError(
                 "fee_rate cannot be negative."
@@ -88,8 +87,13 @@ class RiskEngine:
                 "minimum_expected_net_profit cannot be negative."
             )
 
-        self.account_balance = account_balance
+        if minimum_expected_net_return_percentage < 0:
+            raise ValueError(
+                "minimum_expected_net_return_percentage "
+                "cannot be negative."
+            )
 
+        self.account_balance = account_balance
         self.risk_per_trade = risk_per_trade
 
         self.stop_loss_atr_multiplier = (
@@ -112,10 +116,6 @@ class RiskEngine:
             minimum_position_size
         )
 
-        # ------------------------------------------
-        # Trading cost configuration
-        # ------------------------------------------
-
         self.fee_rate = fee_rate
 
         self.estimated_slippage_rate = (
@@ -126,6 +126,10 @@ class RiskEngine:
             minimum_expected_net_profit
         )
 
+        self.minimum_expected_net_return_percentage = (
+            minimum_expected_net_return_percentage
+        )
+
     # ==================================================
     # UPDATE ACCOUNT BALANCE
     # ==================================================
@@ -134,11 +138,6 @@ class RiskEngine:
         self,
         account_balance: float,
     ):
-        """
-        Update the account balance used
-        for future position sizing.
-        """
-
         if account_balance <= 0:
             raise ValueError(
                 "Account balance must be greater than 0."
@@ -152,33 +151,26 @@ class RiskEngine:
         )
 
     # ==================================================
-    # EVALUATE SIGNAL
+    # EVALUATE
     # ==================================================
 
     def evaluate(
         self,
         signal: dict,
     ) -> dict:
-        """
-        Evaluate BUY / SELL / HOLD signal.
-        """
 
-        action = signal.get(
-            "action"
-        )
+        action = signal.get("action")
 
         if action not in {
             "BUY",
             "SELL",
             "HOLD",
         }:
-
             return self._rejected(
                 "Invalid strategy action."
             )
 
         if action == "HOLD":
-
             return self._hold_result(
                 signal
             )
@@ -197,13 +189,11 @@ class RiskEngine:
         )
 
         if price is None or price <= 0:
-
             return self._rejected(
                 "Invalid entry price."
             )
 
         if atr is None or atr <= 0:
-
             return self._rejected(
                 "ATR is not available."
             )
@@ -226,10 +216,6 @@ class RiskEngine:
         atr: float,
         signal: dict,
     ) -> dict:
-        """
-        Calculate risk, position size, fees,
-        expected profit and expected net profit.
-        """
 
         # ------------------------------------------
         # Risk amount
@@ -250,13 +236,12 @@ class RiskEngine:
         )
 
         if stop_distance <= 0:
-
             return self._rejected(
                 "Invalid stop-loss distance."
             )
 
         # ------------------------------------------
-        # Stop Loss / Take Profit
+        # Stop loss / take profit
         # ------------------------------------------
 
         if action == "BUY":
@@ -290,13 +275,11 @@ class RiskEngine:
             )
 
         if stop_loss <= 0:
-
             return self._rejected(
                 "Calculated stop-loss is invalid."
             )
 
         if take_profit <= 0:
-
             return self._rejected(
                 "Calculated take-profit is invalid."
             )
@@ -306,8 +289,7 @@ class RiskEngine:
         # ------------------------------------------
 
         reward_distance = abs(
-            take_profit
-            - entry_price
+            take_profit - entry_price
         )
 
         risk_reward = (
@@ -315,29 +297,23 @@ class RiskEngine:
             / stop_distance
         )
 
-        if (
-            risk_reward
-            < self.minimum_risk_reward
-        ):
-
+        if risk_reward < self.minimum_risk_reward:
             return self._rejected(
-                f"Risk/reward {risk_reward:.2f} "
-                f"is below minimum "
-                f"{self.minimum_risk_reward:.2f}."
+                (
+                    f"Risk/reward {risk_reward:.2f} "
+                    f"is below minimum "
+                    f"{self.minimum_risk_reward:.2f}."
+                )
             )
 
         # ------------------------------------------
-        # Position size based on risk
+        # Position size
         # ------------------------------------------
 
         position_size = (
             risk_amount
             / stop_distance
         )
-
-        # ------------------------------------------
-        # Maximum allowed position
-        # ------------------------------------------
 
         max_position_value = (
             self.account_balance
@@ -354,11 +330,7 @@ class RiskEngine:
             max_position_size,
         )
 
-        if (
-            position_size
-            < self.minimum_position_size
-        ):
-
+        if position_size < self.minimum_position_size:
             return self._rejected(
                 "Calculated position size is too small."
             )
@@ -373,7 +345,7 @@ class RiskEngine:
         )
 
         # ------------------------------------------
-        # Actual maximum loss
+        # Actual max loss
         # ------------------------------------------
 
         maximum_loss = (
@@ -382,50 +354,28 @@ class RiskEngine:
         )
 
         # ==================================================
-        # FEE-AWARE CALCULATION
+        # FEE / SLIPPAGE / PROFIT CALCULATION
         # ==================================================
-
-        # ------------------------------------------
-        # Entry fee
-        # ------------------------------------------
 
         entry_fee = (
             position_value
             * self.fee_rate
         )
 
-        # ------------------------------------------
-        # Expected exit value at Take Profit
-        # ------------------------------------------
-
         expected_exit_value = (
             position_size
             * take_profit
         )
-
-        # ------------------------------------------
-        # Exit fee
-        # ------------------------------------------
 
         exit_fee = (
             expected_exit_value
             * self.fee_rate
         )
 
-        # ------------------------------------------
-        # Total trading fees
-        # ------------------------------------------
-
         total_fees = (
             entry_fee
             + exit_fee
         )
-
-        # ------------------------------------------
-        # Estimated slippage
-        #
-        # Estimated on both entry and exit.
-        # ------------------------------------------
 
         entry_slippage = (
             position_value
@@ -442,18 +392,10 @@ class RiskEngine:
             + exit_slippage
         )
 
-        # ------------------------------------------
-        # Expected gross profit at TP
-        # ------------------------------------------
-
         expected_gross_profit = (
             reward_distance
             * position_size
         )
-
-        # ------------------------------------------
-        # Expected net profit
-        # ------------------------------------------
 
         expected_net_profit = (
             expected_gross_profit
@@ -461,65 +403,54 @@ class RiskEngine:
             - total_slippage
         )
 
-        # ------------------------------------------
-        # Break-even percentage
-        # ------------------------------------------
-
-        if position_value > 0:
-
-            trading_cost_percentage = (
-                (
-                    total_fees
-                    + total_slippage
-                )
-                / position_value
-            ) * 100
-
-        else:
-
-            trading_cost_percentage = 0.0
-
-        # ------------------------------------------
-        # Expected gross return %
-        # ------------------------------------------
+        trading_cost_percentage = (
+            (
+                total_fees
+                + total_slippage
+            )
+            / position_value
+        ) * 100
 
         expected_gross_return_percentage = (
             reward_distance
             / entry_price
         ) * 100
 
+        expected_net_return_percentage = (
+            expected_net_profit
+            / position_value
+        ) * 100
+
         # ------------------------------------------
-        # Expected net return %
+        # Profitability checks
         # ------------------------------------------
-
-        if position_value > 0:
-
-            expected_net_return_percentage = (
-                expected_net_profit
-                / position_value
-            ) * 100
-
-        else:
-
-            expected_net_return_percentage = 0.0
-
-        # ==================================================
-        # REJECT UNPROFITABLE TRADE
-        # ==================================================
 
         if (
             expected_net_profit
             <= self.minimum_expected_net_profit
         ):
-
             return self._rejected(
                 (
                     "Expected profit does not cover "
                     "fees/slippage sufficiently. "
-                    f"Gross profit={expected_gross_profit:.4f}, "
-                    f"fees={total_fees:.4f}, "
-                    f"slippage={total_slippage:.4f}, "
-                    f"net profit={expected_net_profit:.4f}"
+                    f"Gross={expected_gross_profit:.4f}, "
+                    f"Fees={total_fees:.4f}, "
+                    f"Slippage={total_slippage:.4f}, "
+                    f"Net={expected_net_profit:.4f}"
+                )
+            )
+
+        if (
+            expected_net_return_percentage
+            < self.minimum_expected_net_return_percentage
+        ):
+            return self._rejected(
+                (
+                    "Expected net return is too small. "
+                    f"Expected="
+                    f"{expected_net_return_percentage:.4f}% | "
+                    f"Minimum="
+                    f"{self.minimum_expected_net_return_percentage:.4f}%"
                 )
             )
 
@@ -534,13 +465,12 @@ class RiskEngine:
         if confidence is None:
             confidence = 0.0
 
-        # ==================================================
-        # APPROVED
-        # ==================================================
+        # ------------------------------------------
+        # Approved
+        # ------------------------------------------
 
         return {
             "approved": True,
-
             "action": action,
 
             "entry_price": entry_price,
@@ -563,10 +493,6 @@ class RiskEngine:
 
             "confidence": confidence,
 
-            # --------------------------------------
-            # Fee-aware information
-            # --------------------------------------
-
             "fee_rate": self.fee_rate,
 
             "entry_fee": entry_fee,
@@ -575,29 +501,22 @@ class RiskEngine:
 
             "total_fees": total_fees,
 
-            "estimated_slippage": (
-                total_slippage
-            ),
+            "estimated_slippage": total_slippage,
 
-            "expected_gross_profit": (
-                expected_gross_profit
-            ),
+            "expected_gross_profit":
+                expected_gross_profit,
 
-            "expected_net_profit": (
-                expected_net_profit
-            ),
+            "expected_net_profit":
+                expected_net_profit,
 
-            "trading_cost_percentage": (
-                trading_cost_percentage
-            ),
+            "trading_cost_percentage":
+                trading_cost_percentage,
 
-            "expected_gross_return_percentage": (
-                expected_gross_return_percentage
-            ),
+            "expected_gross_return_percentage":
+                expected_gross_return_percentage,
 
-            "expected_net_return_percentage": (
-                expected_net_return_percentage
-            ),
+            "expected_net_return_percentage":
+                expected_net_return_percentage,
 
             "reason": signal.get(
                 "reason",
@@ -616,7 +535,6 @@ class RiskEngine:
 
         return {
             "approved": False,
-
             "action": "HOLD",
 
             "entry_price":
@@ -706,12 +624,10 @@ class RiskEngine:
             return None
 
         try:
-
             return float(value)
 
         except (
             TypeError,
             ValueError,
         ):
-
             return None

@@ -297,12 +297,18 @@ class RiskEngine:
             / stop_distance
         )
 
-        if risk_reward < self.minimum_risk_reward:
+        tolerance = 1e-9
+
+        if (
+            risk_reward + tolerance
+            < self.minimum_risk_reward
+        ):
+
             return self._rejected(
                 (
-                    f"Risk/reward {risk_reward:.2f} "
+                    f"Risk/reward {risk_reward:.4f} "
                     f"is below minimum "
-                    f"{self.minimum_risk_reward:.2f}."
+                    f"{self.minimum_risk_reward:.4f}."
                 )
             )
 

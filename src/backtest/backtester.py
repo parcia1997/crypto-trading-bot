@@ -1,4 +1,5 @@
 import logging
+from collections import Counter
 
 from src.bot.trading_bot import TradingBot
 from src.backtest.metrics import BacktestMetrics
@@ -9,16 +10,14 @@ logger = logging.getLogger(__name__)
 
 class Backtester:
     """
-    Replays historical candles through the TradingBot.
+    Replays historical candles through TradingBot.
 
-    Uses the same:
-        - strategy
-        - risk engine
-        - fee assumptions
-        - paper execution
-        - portfolio logic
-
-    as the live paper-trading system.
+    Tracks:
+        - Trades
+        - Equity
+        - Signals
+        - Rejected trades
+        - Rejection reasons
     """
 
     def __init__(
@@ -28,7 +27,9 @@ class Backtester:
         warmup_candles: int = 50,
     ):
         self.symbol = symbol
+
         self.starting_balance = starting_balance
+
         self.warmup_candles = warmup_candles
 
         self.bot = TradingBot(
@@ -38,24 +39,28 @@ class Backtester:
 
         self.equity_curve = []
 
+        self.rejection_reasons = Counter()
+
+    # ==================================================
+    # RUN BACKTEST
+    # ==================================================
+
     def run(
         self,
         candles: list[dict],
     ) -> dict:
-        """
-        Run the backtest.
-        """
 
         if len(candles) <= self.warmup_candles:
+
             raise ValueError(
                 "Not enough candles for backtesting."
             )
 
         self.bot.start()
 
-        # ------------------------------------------
-        # Warm-up history
-        # ------------------------------------------
+        # --------------------------------------------------
+        # WARM-UP
+        # --------------------------------------------------
 
         warmup = candles[
             :self.warmup_candles
@@ -65,17 +70,49 @@ class Backtester:
             warmup
         )
 
-        # ------------------------------------------
-        # Replay candles one by one
-        # ------------------------------------------
+        # --------------------------------------------------
+        # REPLAY CANDLES
+        # --------------------------------------------------
 
         for candle in candles[
             self.warmup_candles:
         ]:
 
-            self.bot.process_candle(
-                candle
+            result = (
+                self.bot.process_candle(
+                    candle
+                )
             )
+
+            # ----------------------------------------------
+            # TRACK REJECTION REASONS
+            # ----------------------------------------------
+
+            if (
+                result.get("executed") is False
+                and result.get("risk")
+                and not result["risk"].get(
+                    "approved",
+                    False,
+                )
+            ):
+
+                reasons = (
+                    result["risk"].get(
+                        "reason",
+                        [],
+                    )
+                )
+
+                for reason in reasons:
+
+                    self._record_rejection_reason(
+                        reason
+                    )
+
+            # ----------------------------------------------
+            # EQUITY CURVE
+            # ----------------------------------------------
 
             equity = (
                 self.bot.paper_engine.equity()
@@ -85,9 +122,9 @@ class Backtester:
                 equity
             )
 
-        # ------------------------------------------
-        # Close any remaining position
-        # ------------------------------------------
+        # --------------------------------------------------
+        # CLOSE OPEN POSITION AT END
+        # --------------------------------------------------
 
         if (
             self.bot.paper_engine.position
@@ -106,21 +143,30 @@ class Backtester:
             )
 
             if result.get("success"):
+
                 self.bot._sync_portfolio_after_close()
 
         self.bot.stop()
 
-        # ------------------------------------------
-        # Metrics
-        # ------------------------------------------
+        # --------------------------------------------------
+        # FINAL EQUITY
+        # --------------------------------------------------
 
         ending_equity = (
             self.bot.paper_engine.equity()
         )
 
+        # --------------------------------------------------
+        # TRADE HISTORY
+        # --------------------------------------------------
+
         trades = (
             self.bot.paper_engine.trade_history
         )
+
+        # --------------------------------------------------
+        # METRICS
+        # --------------------------------------------------
 
         metrics = (
             BacktestMetrics.calculate(
@@ -129,6 +175,10 @@ class Backtester:
                 ending_equity=ending_equity,
             )
         )
+
+        # --------------------------------------------------
+        # EXTRA BACKTEST DATA
+        # --------------------------------------------------
 
         metrics["starting_balance"] = (
             self.starting_balance
@@ -158,4 +208,151 @@ class Backtester:
             self.bot.rejected_trades
         )
 
+        metrics["rejection_reasons"] = dict(
+            self.rejection_reasons
+        )
+
+        metrics["equity_curve"] = (
+            self.equity_curve
+        )
+
         return metrics
+
+    # ==================================================
+    # REJECTION ANALYSIS
+    # ==================================================
+
+    def _record_rejection_reason(
+        self,
+        reason: str,
+    ):
+        """
+        Convert detailed RiskEngine messages
+        into simple rejection categories.
+        """
+
+        if not reason:
+
+            self.rejection_reasons[
+                "UNKNOWN"
+            ] += 1
+
+            return
+
+        text = reason.lower()
+
+        # --------------------------------------------------
+        # Expected net return too small
+        # --------------------------------------------------
+
+        if (
+            "expected net return is too small"
+            in text
+        ):
+
+            category = (
+                "NET_RETURN_TOO_SMALL"
+            )
+
+        # --------------------------------------------------
+        # Profit doesn't cover fees/slippage
+        # --------------------------------------------------
+
+        elif (
+            "expected profit does not cover"
+            in text
+            or
+            "expected net profit is too small"
+            in text
+        ):
+
+            category = (
+                "NET_PROFIT_TOO_SMALL"
+            )
+
+        # --------------------------------------------------
+        # Risk/reward
+        # --------------------------------------------------
+
+        elif "risk/reward" in text:
+
+            category = (
+                "RISK_REWARD_TOO_LOW"
+            )
+
+        # --------------------------------------------------
+        # ATR
+        # --------------------------------------------------
+
+        elif (
+            "atr is not available"
+            in text
+        ):
+
+            category = (
+                "ATR_MISSING"
+            )
+
+        # --------------------------------------------------
+        # Position size
+        # --------------------------------------------------
+
+        elif (
+            "position size is too small"
+            in text
+        ):
+
+            category = (
+                "POSITION_TOO_SMALL"
+            )
+
+        # --------------------------------------------------
+        # Entry price
+        # --------------------------------------------------
+
+        elif (
+            "invalid entry price"
+            in text
+        ):
+
+            category = (
+                "INVALID_ENTRY_PRICE"
+            )
+
+        # --------------------------------------------------
+        # Stop loss
+        # --------------------------------------------------
+
+        elif (
+            "stop-loss"
+            in text
+        ):
+
+            category = (
+                "STOP_LOSS_INVALID"
+            )
+
+        # --------------------------------------------------
+        # Take profit
+        # --------------------------------------------------
+
+        elif (
+            "take-profit"
+            in text
+        ):
+
+            category = (
+                "TAKE_PROFIT_INVALID"
+            )
+
+        # --------------------------------------------------
+        # Everything else
+        # --------------------------------------------------
+
+        else:
+
+            category = "OTHER"
+
+        self.rejection_reasons[
+            category
+        ] += 1

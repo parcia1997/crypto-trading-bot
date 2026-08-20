@@ -5,6 +5,10 @@ from src.market.historical import BinanceHistoricalData
 from src.backtest.backtester import Backtester
 
 
+# ============================================================
+# LOGGING
+# ============================================================
+
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s | %(levelname)s | %(message)s",
@@ -13,11 +17,19 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 
+# ============================================================
+# MAIN
+# ============================================================
+
 async def main():
 
     logger.info(
         "Starting ETHUSDT backtest..."
     )
+
+    # --------------------------------------------------------
+    # HISTORICAL DATA
+    # --------------------------------------------------------
 
     historical = BinanceHistoricalData(
         symbol="ETHUSDT",
@@ -32,6 +44,10 @@ async def main():
         len(candles),
     )
 
+    # --------------------------------------------------------
+    # BACKTESTER
+    # --------------------------------------------------------
+
     backtester = Backtester(
         symbol="ETHUSDT",
         starting_balance=1000.0,
@@ -42,10 +58,18 @@ async def main():
         candles
     )
 
+    # ========================================================
+    # RESULTS
+    # ========================================================
+
     print()
-    print("=" * 55)
-    print("ETHUSDT BACKTEST RESULTS")
-    print("=" * 55)
+    print("=" * 60)
+
+    print(
+        "ETHUSDT BACKTEST RESULTS"
+    )
+
+    print("=" * 60)
 
     print(
         f"Starting Balance : "
@@ -66,6 +90,8 @@ async def main():
         f"Return           : "
         f"{result['return_percentage']:.2f}%"
     )
+
+    print()
 
     print(
         f"Total Trades     : "
@@ -92,6 +118,8 @@ async def main():
         f"{result['profit_factor']:.2f}"
     )
 
+    print()
+
     print(
         f"Average Win      : "
         f"${result['average_win']:.4f}"
@@ -106,6 +134,8 @@ async def main():
         f"Total Fees       : "
         f"${result['total_fees']:.4f}"
     )
+
+    print()
 
     print(
         f"BUY Signals      : "
@@ -127,8 +157,52 @@ async def main():
         f"{result['rejected_trades']}"
     )
 
-    print("=" * 55)
+    # ========================================================
+    # REJECTION ANALYSIS
+    # ========================================================
 
+    print()
+
+    print(
+        "REJECTION ANALYSIS"
+    )
+
+    print("-" * 60)
+
+    rejections = result.get(
+        "rejection_reasons",
+        {},
+    )
+
+    if not rejections:
+
+        print(
+            "No rejected trade reasons recorded."
+        )
+
+    else:
+
+        sorted_rejections = sorted(
+            rejections.items(),
+            key=lambda item: item[1],
+            reverse=True,
+        )
+
+        for reason, count in sorted_rejections:
+
+            print(
+                f"{reason:<35} : {count}"
+            )
+
+    print("=" * 60)
+
+
+# ============================================================
+# ENTRY POINT
+# ============================================================
 
 if __name__ == "__main__":
-    asyncio.run(main())
+
+    asyncio.run(
+        main()
+    )

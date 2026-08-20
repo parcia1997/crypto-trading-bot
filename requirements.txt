@@ -7,3 +7,6 @@ python-dotenv
 pydantic
 pytest
 pytest-asyncio
+SQLAlchemy
+psycopg[binary]
+python-dotenv

@@ -35,6 +35,7 @@ class Backtester:
         self.bot = TradingBot(
             symbol=symbol,
             starting_balance=starting_balance,
+            enable_database=False,
         )
 
         self.equity_curve = []

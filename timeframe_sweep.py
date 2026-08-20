@@ -95,6 +95,7 @@ async def main():
                 minimum_expected_net_return_percentage=(
                     threshold
                 ),
+                enable_database=False,
             )
 
             result = backtester.run(

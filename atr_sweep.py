@@ -128,6 +128,7 @@ async def main():
         backtester.bot = TradingBot(
             symbol=SYMBOL,
             starting_balance=STARTING_BALANCE,
+            enable_database=False,
 
             stop_loss_atr_multiplier=(
                 stop_loss_multiplier

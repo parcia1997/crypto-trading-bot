@@ -32,7 +32,7 @@ async def main():
     historical = BinanceHistoricalData(
         symbol="ETHUSDT",
         interval="1m",
-        limit=1000,
+        limit=10000,
     )
 
     candles = await historical.fetch()
